@@ -10,7 +10,7 @@ app = Flask(__name__)
 def home():
     return "✅ Бот работает!"
 
-TOKEN = "8681069436:AAGq-ebbI-FGalB3m4SWx5L9OGC3pjKuY50"
+TOKEN = "8776336680:AAFyM8_rtWnNyI61TZ5IjQl8bJ-vGpla6DQ"
 
 bot = telebot.TeleBot(TOKEN)
 
