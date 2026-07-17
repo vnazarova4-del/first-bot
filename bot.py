@@ -1,6 +1,8 @@
 import telebot
-import random
+import datetime
 import json
+import os
+import random
 from flask import Flask
 import threading
 
@@ -10,18 +12,82 @@ app = Flask(__name__)
 def home():
     return "✅ Бот работает!"
 
-# ===== ПРАВИЛЬНЫЙ ТОКЕН ДЛЯ ПЕРВОГО БОТА =====
+# ===== ТОКЕН ПЕРВОГО БОТА =====
 TOKEN = "8776336680:AAFyM8_rtWnNyI61TZ5IjQl8bJ-vGpla6DQ"
-# =============================================
+# =================================
 
 bot = telebot.TeleBot(TOKEN)
 
+# ===== ФАЙЛ ДЛЯ ХРАНЕНИЯ ДАННЫХ =====
+DATA_FILE = "user_data.json"
+
 # =============================================
-# ПОЛНАЯ БАЗА РЕЦЕПТОВ (СТАРЫЕ + НОВЫЕ ПП-УЖИНЫ)
+# РАБОТА С ДАННЫМИ
+# =============================================
+
+def load_data():
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+def save_data(data):
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+def get_user_data(user_id):
+    data = load_data()
+    user_id = str(user_id)
+    if user_id not in data:
+        data[user_id] = {
+            "daily_goal": {"kcal": 2000, "protein": 150, "fat": 70, "carbs": 200},
+            "today_food": [],
+            "pending_recipe": None,
+            "pending_weight": False,
+            "difficulty": "простой",
+            "last_category": None
+        }
+        save_data(data)
+    return data[user_id]
+
+def save_user_data(user_id, user_data):
+    data = load_data()
+    data[str(user_id)] = user_data
+    save_data(data)
+
+def get_user_stats(user_id):
+    user_data = get_user_data(user_id)
+    food_list = user_data.get("today_food", [])
+    
+    total_kcal = sum(f["kcal"] for f in food_list)
+    total_protein = sum(f["protein"] for f in food_list)
+    total_fat = sum(f["fat"] for f in food_list)
+    total_carbs = sum(f["carbs"] for f in food_list)
+    
+    goal = user_data.get("daily_goal", {"kcal": 2000, "protein": 150, "fat": 70, "carbs": 200})
+    
+    return {
+        "total_kcal": total_kcal,
+        "total_protein": total_protein,
+        "total_fat": total_fat,
+        "total_carbs": total_carbs,
+        "goal_kcal": goal.get("kcal", 2000),
+        "goal_protein": goal.get("protein", 150),
+        "goal_fat": goal.get("fat", 70),
+        "goal_carbs": goal.get("carbs", 200),
+        "remaining_kcal": max(0, goal.get("kcal", 2000) - total_kcal),
+        "remaining_protein": max(0, goal.get("protein", 150) - total_protein),
+        "remaining_fat": max(0, goal.get("fat", 70) - total_fat),
+        "remaining_carbs": max(0, goal.get("carbs", 200) - total_carbs),
+        "food_count": len(food_list)
+    }
+
+# =============================================
+# ПОЛНАЯ БАЗА РЕЦЕПТОВ
 # =============================================
 RECIPES = {
     # ========================================
-    # СТАРЫЕ РЕЦЕПТЫ (ЗАВТРАКИ)
+    # ЗАВТРАКИ (СТАРЫЕ)
     # ========================================
     "омлет классический": {
         "ингредиенты": "🥚 Яйца (3 шт), 🥛 Молоко (50 мл), 🧂 Соль, 🧈 Масло сливочное (10 г), 🌿 Зелень",
@@ -113,7 +179,7 @@ RECIPES = {
     },
 
     # ========================================
-    # СТАРЫЕ РЕЦЕПТЫ (ОБЕДЫ)
+    # ОБЕДЫ (СТАРЫЕ)
     # ========================================
     "борщ классический": {
         "ингредиенты": "🥩 Говядина (500 г), 🥬 Капуста (300 г), 🥕 Морковь (1 шт), 🧅 Лук (1 шт), 🥔 Картошка (3 шт), 🍅 Томатная паста (2 ст.л), 🌿 Свекла (1 шт), 🌿 Зелень",
@@ -139,7 +205,7 @@ RECIPES = {
     },
 
     # ========================================
-    # СТАРЫЕ РЕЦЕПТЫ (УЖИНЫ)
+    # УЖИНЫ (СТАРЫЕ)
     # ========================================
     "паста карбонара": {
         "ингредиенты": "🍝 Спагетти (400 г), 🥓 Бекон (150 г), 🥚 Яйца (3 шт), 🧀 Пармезан (50 г), 🧄 Чеснок, 🧂 Соль, перец",
@@ -280,68 +346,34 @@ RECIPES = {
 }
 
 # =============================================
-# ЛОГИКА БОТА
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # =============================================
 
-@bot.message_handler(commands=['start'])
-def start(message):
-    bot.send_message(
-        message.chat.id,
-        "👋 Привет! Я бот-шеф-повар!\n\n"
-        "📋 Напиши название блюда (например, 'Омлет классический'),\n"
-        "и я пришлю рецепт с КБЖУ!\n\n"
-        "🍽️ Доступные категории: завтрак, обед, ужин\n"
-        "🥗 Новые ПП-ужины уже добавлены!\n\n"
-        "🔍 Можно искать по части названия."
-    )
+def get_habits_by_category(category):
+    result = {}
+    for name, data in RECIPES.items():
+        if data.get("категория") == category:
+            result[name] = data
+    return result
 
-@bot.message_handler(func=lambda message: True)
-def handle_recipe(message):
-    text = message.text.lower().strip()
-    
-    # Точный поиск
-    if text in RECIPES:
-        recipe = RECIPES[text]
-        send_recipe(message.chat.id, text, recipe)
-        return
-    
-    # Поиск по части названия
-    found = False
-    for name in RECIPES:
-        if text in name or name in text:
-            recipe = RECIPES[name]
-            send_recipe(message.chat.id, name, recipe)
-            found = True
-            break
-    
-    if not found:
-        bot.reply_to(
-            message,
-            "😅 Я не нашёл такого рецепта.\n\n"
-            "📋 Попробуй написать:\n"
-            "• Омлет классический\n"
-            "• Блины тонкие\n"
-            "• Овсянка с яблоком\n"
-            "• Сырники\n"
-            "• Тосты с авокадо\n"
-            "• Борщ классический\n"
-            "• Гречка с мясом\n"
-            "• Паста карбонара\n"
-            "• Стейк с картофелем\n"
-            "• Куриная грудка с гречкой и морковью\n"
-            "• Запечённая рыба с овощами\n"
-            "• Омлет с овощами\n"
-            "• Тушёная курица с кабачками\n"
-            "• Рыбные котлеты с рисом\n"
-            "• Овощное рагу с нутом\n"
-            "• Салат с курицей и авокадо\n"
-            "• Кабачки с фаршем\n"
-            "• Греческий салат с сыром фета\n"
-            "• Запечённый тунец с зеленью\n\n"
-            "Или просто напиши часть названия!"
-        )
+def get_habits_by_difficulty(difficulty):
+    result = {}
+    for name, data in RECIPES.items():
+        if data.get("сложность") == difficulty:
+            result[name] = data
+    return result
 
-def send_recipe(chat_id, name, recipe):
+def format_recipe_list(recipes, category_name, difficulty):
+    if not recipes:
+        return f"😅 В категории '{category_name}' с уровнем '{difficulty}' нет рецептов."
+    
+    text = f"🍽 *{category_name.capitalize()} (уровень: {difficulty}):*\n\n"
+    for i, (name, data) in enumerate(recipes.items(), 1):
+        text += f"{i}. {name.capitalize()} — {data['время']} — {data['kcal_100']} ккал/100г\n"
+    text += "\n✏️ Напиши номер (например, 5), чтобы получить рецепт!"
+    return text
+
+def send_recipe(chat_id, name, recipe, show_add_button=True):
     reply = (
         f"🍽 *{name.capitalize()}*\n"
         f"{'='*30}\n\n"
@@ -358,20 +390,421 @@ def send_recipe(chat_id, name, recipe):
         f"🏷️ *Категория:* {recipe['категория'].capitalize()}\n"
         f"🏷️ *Сложность:* {recipe['сложность'].capitalize()}"
     )
+    
+    if show_add_button:
+        markup = telebot.types.InlineKeyboardMarkup()
+        markup.add(telebot.types.InlineKeyboardButton(
+            "📝 Добавить в дневник",
+            callback_data=f"add_{name}"
+        ))
+        bot.send_message(chat_id, reply, parse_mode='Markdown', reply_markup=markup)
+    else:
+        bot.send_message(chat_id, reply, parse_mode='Markdown')
+
+def show_stats(chat_id):
+    user_id = chat_id
+    stats = get_user_stats(user_id)
+    
+    if stats["food_count"] == 0:
+        bot.send_message(chat_id, "📭 Ты ещё ничего не добавил в дневник сегодня.")
+        return
+    
+    progress_kcal = min(100, int((stats["total_kcal"] / stats["goal_kcal"]) * 100))
+    bar_kcal = "█" * (progress_kcal // 5) + "░" * (20 - (progress_kcal // 5))
+    
+    progress_protein = min(100, int((stats["total_protein"] / stats["goal_protein"]) * 100))
+    bar_protein = "█" * (progress_protein // 5) + "░" * (20 - (progress_protein // 5))
+    
+    progress_fat = min(100, int((stats["total_fat"] / stats["goal_fat"]) * 100))
+    bar_fat = "█" * (progress_fat // 5) + "░" * (20 - (progress_fat // 5))
+    
+    progress_carbs = min(100, int((stats["total_carbs"] / stats["goal_carbs"]) * 100))
+    bar_carbs = "█" * (progress_carbs // 5) + "░" * (20 - (progress_carbs // 5))
+    
+    reply = (
+        f"📊 *Твоя статистика сегодня:*\n\n"
+        f"🥗 Съедено блюд: {stats['food_count']}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔥 *Калории:* {stats['total_kcal']:.0f} / {stats['goal_kcal']} ккал\n"
+        f"⚡️ Осталось: {stats['remaining_kcal']:.0f} ккал\n"
+        f"`{bar_kcal}` {progress_kcal}%\n\n"
+        f"💪 *Белки:* {stats['total_protein']:.0f} / {stats['goal_protein']} г\n"
+        f"⚡️ Осталось: {stats['remaining_protein']:.0f} г\n"
+        f"`{bar_protein}` {progress_protein}%\n\n"
+        f"🧈 *Жиры:* {stats['total_fat']:.0f} / {stats['goal_fat']} г\n"
+        f"⚡️ Осталось: {stats['remaining_fat']:.0f} г\n"
+        f"`{bar_fat}` {progress_fat}%\n\n"
+        f"🍚 *Углеводы:* {stats['total_carbs']:.0f} / {stats['goal_carbs']} г\n"
+        f"⚡️ Осталось: {stats['remaining_carbs']:.0f} г\n"
+        f"`{bar_carbs}` {progress_carbs}%"
+    )
     bot.send_message(chat_id, reply, parse_mode='Markdown')
 
 # =============================================
-# ЗАПУСК БОТА В ПОТОКЕ ДЛЯ RENDER
+# ОБРАБОТЧИКИ КОМАНД
+# =============================================
+
+@bot.message_handler(commands=['start'])
+def start(message):
+    user_id = message.chat.id
+    user_data = get_user_data(user_id)
+    
+    markup = telebot.types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
+    buttons = [
+        telebot.types.KeyboardButton("🍳 Завтрак"),
+        telebot.types.KeyboardButton("🍲 Обед"),
+        telebot.types.KeyboardButton("🍝 Ужин"),
+        telebot.types.KeyboardButton("⚙️ Настройки"),
+        telebot.types.KeyboardButton("📊 Статистика"),
+        telebot.types.KeyboardButton("📋 Чеклист"),
+        telebot.types.KeyboardButton("🎲 Случайный рецепт")
+    ]
+    markup.add(*buttons)
+    
+    difficulty = user_data.get("difficulty", "простой")
+    
+    bot.send_message(
+        message.chat.id,
+        f"👋 *Привет! Я бот-шеф-повар!*\n\n"
+        f"🔹 Настрой свой профиль через ⚙️ Настройки\n"
+        f"🔹 Выбирай категорию: Завтрак, Обед или Ужин\n"
+        f"🔹 Напиши номер — получи рецепт!\n"
+        f"🔹 Нажми 'Добавить в дневник' и укажи вес порции\n\n"
+        f"📊 *Текущий уровень сложности:* {difficulty.capitalize()}",
+        reply_markup=markup,
+        parse_mode='Markdown'
+    )
+
+@bot.message_handler(func=lambda m: m.text == "⚙️ Настройки")
+def settings_menu(message):
+    user_id = message.chat.id
+    user_data = get_user_data(user_id)
+    
+    markup = telebot.types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
+    markup.add(
+        "🍽 Норма КБЖУ",
+        "📊 Уровень сложности",
+        "🗑 Сбросить дневник",
+        "🔙 Назад"
+    )
+    
+    goal = user_data.get("daily_goal", {"kcal": 2000, "protein": 150, "fat": 70, "carbs": 200})
+    
+    bot.send_message(
+        message.chat.id,
+        f"⚙️ *Настройки:*\n\n"
+        f"🔥 Норма калорий: {goal['kcal']} ккал\n"
+        f"💪 Белки: {goal['protein']} г\n"
+        f"🧈 Жиры: {goal['fat']} г\n"
+        f"🍚 Углеводы: {goal['carbs']} г\n\n"
+        f"📊 Уровень сложности: {user_data.get('difficulty', 'простой').capitalize()}",
+        reply_markup=markup,
+        parse_mode='Markdown'
+    )
+
+@bot.message_handler(func=lambda m: m.text == "🍽 Норма КБЖУ")
+def set_goal_menu(message):
+    msg = bot.send_message(
+        message.chat.id,
+        "🍽 *Установим дневную норму КБЖУ*\n\n"
+        "Напиши в формате:\n"
+        "`калории, белки, жиры, углеводы`\n\n"
+        "Например: `2000, 150, 70, 200`\n\n"
+        "Или просто число (только калории): `1800`",
+        parse_mode='Markdown'
+    )
+    bot.register_next_step_handler(msg, save_goal)
+
+def save_goal(message):
+    try:
+        text = message.text.strip()
+        user_id = message.chat.id
+        user_data = get_user_data(user_id)
+        
+        if "," in text:
+            parts = [p.strip() for p in text.split(",")]
+            if len(parts) == 4:
+                user_data["daily_goal"] = {
+                    "kcal": int(parts[0]),
+                    "protein": int(parts[1]),
+                    "fat": int(parts[2]),
+                    "carbs": int(parts[3])
+                }
+                save_user_data(user_id, user_data)
+                bot.send_message(
+                    user_id,
+                    f"✅ Норма установлена:\n"
+                    f"🔥 {parts[0]} ккал\n"
+                    f"💪 {parts[1]} г белков\n"
+                    f"🧈 {parts[2]} г жиров\n"
+                    f"🍚 {parts[3]} г углеводов"
+                )
+                return
+        
+        goal = int(text)
+        user_data["daily_goal"] = {
+            "kcal": goal,
+            "protein": 150,
+            "fat": 70,
+            "carbs": 200
+        }
+        save_user_data(user_id, user_data)
+        bot.send_message(
+            user_id,
+            f"✅ Норма установлена:\n"
+            f"🔥 {goal} ккал\n"
+            f"💪 150 г белков (по умолчанию)\n"
+            f"🧈 70 г жиров (по умолчанию)\n"
+            f"🍚 200 г углеводов (по умолчанию)"
+        )
+    except:
+        bot.reply_to(message, "❌ Неправильный формат. Напиши: `2000, 150, 70, 200`", parse_mode='Markdown')
+
+@bot.message_handler(func=lambda m: m.text == "📊 Уровень сложности")
+def set_difficulty_menu(message):
+    markup = telebot.types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
+    markup.add("🟢 Простой", "🟡 Средний", "🔴 Сложный", "🔙 Назад")
+    bot.send_message(
+        message.chat.id,
+        "📊 *Выбери уровень сложности:*\n\n"
+        "🟢 Простой — до 10 минут, 3-5 ингредиентов\n"
+        "🟡 Средний — до 30 минут, классические рецепты\n"
+        "🔴 Сложный — от 30 минут, интересная техника",
+        reply_markup=markup,
+        parse_mode='Markdown'
+    )
+
+@bot.message_handler(func=lambda m: m.text in ["🟢 Простой", "🟡 Средний", "🔴 Сложный"])
+def save_difficulty(message):
+    diff_map = {
+        "🟢 Простой": "простой",
+        "🟡 Средний": "средний",
+        "🔴 Сложный": "сложный"
+    }
+    user_id = message.chat.id
+    user_data = get_user_data(user_id)
+    user_data["difficulty"] = diff_map[message.text]
+    save_user_data(user_id, user_data)
+    bot.send_message(user_id, f"✅ Уровень сложности: {message.text}")
+
+@bot.message_handler(func=lambda m: m.text == "🗑 Сбросить дневник")
+def reset_diary(message):
+    user_id = message.chat.id
+    user_data = get_user_data(user_id)
+    user_data["today_food"] = []
+    save_user_data(user_id, user_data)
+    bot.send_message(user_id, "🗑 Дневник питания очищен!")
+
+@bot.message_handler(func=lambda m: m.text == "📊 Статистика")
+def stats_command(message):
+    show_stats(message.chat.id)
+
+@bot.message_handler(func=lambda m: m.text == "🔙 Назад")
+def back_to_main(message):
+    start(message)
+
+@bot.message_handler(func=lambda m: m.text == "🍳 Завтрак")
+def show_breakfast(message):
+    user_id = message.chat.id
+    user_data = get_user_data(user_id)
+    difficulty = user_data.get("difficulty", "простой")
+    
+    recipes = get_habits_by_category("завтрак")
+    filtered = {}
+    for name, data in recipes.items():
+        if data.get("сложность") == difficulty:
+            filtered[name] = data
+    
+    if not filtered:
+        filtered = recipes
+    
+    user_data["last_category"] = "завтрак"
+    user_data["last_recipes"] = filtered
+    save_user_data(user_id, user_data)
+    
+    reply = format_recipe_list(filtered, "завтрак", difficulty)
+    bot.send_message(user_id, reply, parse_mode='Markdown')
+
+@bot.message_handler(func=lambda m: m.text == "🍲 Обед")
+def show_lunch(message):
+    user_id = message.chat.id
+    user_data = get_user_data(user_id)
+    difficulty = user_data.get("difficulty", "простой")
+    
+    recipes = get_habits_by_category("обед")
+    filtered = {}
+    for name, data in recipes.items():
+        if data.get("сложность") == difficulty:
+            filtered[name] = data
+    
+    if not filtered:
+        filtered = recipes
+    
+    user_data["last_category"] = "обед"
+    user_data["last_recipes"] = filtered
+    save_user_data(user_id, user_data)
+    
+    reply = format_recipe_list(filtered, "обед", difficulty)
+    bot.send_message(user_id, reply, parse_mode='Markdown')
+
+@bot.message_handler(func=lambda m: m.text == "🍝 Ужин")
+def show_dinner(message):
+    user_id = message.chat.id
+    user_data = get_user_data(user_id)
+    difficulty = user_data.get("difficulty", "простой")
+    
+    recipes = get_habits_by_category("ужин")
+    filtered = {}
+    for name, data in recipes.items():
+        if data.get("сложность") == difficulty:
+            filtered[name] = data
+    
+    if not filtered:
+        filtered = recipes
+    
+    user_data["last_category"] = "ужин"
+    user_data["last_recipes"] = filtered
+    save_user_data(user_id, user_data)
+    
+    reply = format_recipe_list(filtered, "ужин", difficulty)
+    bot.send_message(user_id, reply, parse_mode='Markdown')
+
+@bot.message_handler(func=lambda m: m.text == "📋 Чеклист")
+def manual_checklist(message):
+    user_id = message.chat.id
+    user_data = get_user_data(user_id)
+    
+    if not user_data.get("last_recipes"):
+        bot.send_message(user_id, "❌ Сначала выбери категорию: Завтрак, Обед или Ужин!")
+        return
+    
+    reply = format_recipe_list(
+        user_data["last_recipes"],
+        user_data.get("last_category", "блюд"),
+        user_data.get("difficulty", "простой")
+    )
+    bot.send_message(user_id, reply, parse_mode='Markdown')
+
+@bot.message_handler(func=lambda m: m.text == "🎲 Случайный рецепт")
+def random_recipe(message):
+    user_id = message.chat.id
+    name = random.choice(list(RECIPES.keys()))
+    recipe = RECIPES[name]
+    send_recipe(user_id, name, recipe, show_add_button=True)
+
+@bot.message_handler(func=lambda m: m.text.isdigit() and len(m.text) <= 2)
+def handle_number(message):
+    user_id = message.chat.id
+    user_data = get_user_data(user_id)
+    num = int(message.text.strip()) - 1
+    
+    recipes = user_data.get("last_recipes")
+    if not recipes:
+        bot.send_message(user_id, "❌ Сначала выбери категорию: Завтрак, Обед или Ужин!")
+        return
+    
+    recipe_names = list(recipes.keys())
+    if 0 <= num < len(recipe_names):
+        name = recipe_names[num]
+        recipe = recipes[name]
+        send_recipe(user_id, name, recipe, show_add_button=True)
+    else:
+        bot.send_message(user_id, f"❌ Нет рецепта под номером {num + 1}. Попробуй от 1 до {len(recipe_names)}.")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("add_"))
+def ask_weight(call):
+    user_id = call.message.chat.id
+    recipe_name = call.data.replace("add_", "")
+    
+    user_data = get_user_data(user_id)
+    user_data["pending_recipe"] = recipe_name
+    user_data["pending_weight"] = True
+    save_user_data(user_id, user_data)
+    
+    bot.send_message(
+        user_id,
+        f"📝 *{recipe_name.capitalize()}*\n\n"
+        f"✏️ Напиши вес в граммах (например, 150):",
+        parse_mode='Markdown'
+    )
+    bot.answer_callback_query(call.id)
+
+@bot.message_handler(func=lambda m: m.text.isdigit() and m.chat.id in [int(uid) for uid in load_data().keys()])
+def save_food_with_weight(message):
+    user_id = message.chat.id
+    user_data = get_user_data(user_id)
+    
+    if not user_data.get("pending_weight") or not user_data.get("pending_recipe"):
+        return
+    
+    try:
+        weight = float(message.text.strip())
+        name = user_data["pending_recipe"]
+        recipe = RECIPES[name]
+        
+        kcal = round(recipe["kcal_100"] * weight / 100, 1)
+        protein = round(recipe["protein_100"] * weight / 100, 1)
+        fat = round(recipe["fat_100"] * weight / 100, 1)
+        carbs = round(recipe["carbs_100"] * weight / 100, 1)
+        
+        user_data["today_food"].append({
+            "name": name,
+            "weight": weight,
+            "kcal": kcal,
+            "protein": protein,
+            "fat": fat,
+            "carbs": carbs
+        })
+        
+        user_data["pending_weight"] = False
+        user_data["pending_recipe"] = None
+        save_user_data(user_id, user_data)
+        
+        bot.send_message(
+            user_id,
+            f"✅ *{name.capitalize()}* — {weight} г добавлен в дневник!\n\n"
+            f"📊 КБЖУ:\n"
+            f"🔥 {kcal} ккал\n"
+            f"💪 {protein} г белков\n"
+            f"🧈 {fat} г жиров\n"
+            f"🍚 {carbs} г углеводов",
+            parse_mode='Markdown'
+        )
+    except:
+        bot.reply_to(message, "❌ Напиши число, например 150")
+
+@bot.message_handler(func=lambda m: True)
+def handle_unknown(message):
+    text = message.text.lower().strip()
+    user_id = message.chat.id
+    
+    # Игнорируем кнопки и команды
+    if text in ["🍳 завтрак", "🍲 обед", "🍝 ужин", "⚙️ настройки", "📊 статистика", "📋 чеклист", "🎲 случайный рецепт"]:
+        return
+    
+    # Поиск по названию
+    for name, recipe in RECIPES.items():
+        if text in name.lower() or name.lower() in text:
+            send_recipe(user_id, name, recipe, show_add_button=True)
+            return
+    
+    bot.send_message(
+        user_id,
+        "😅 Я не нашёл такого рецепта.\n\n"
+        "📋 Попробуй:\n"
+        "• выбрать категорию (Завтрак/Обед/Ужин)\n"
+        "• написать название блюда\n"
+        "• нажать '🎲 Случайный рецепт'"
+    )
+
+# =============================================
+# ЗАПУСК БОТА
 # =============================================
 
 def run_bot():
     bot.infinity_polling()
 
 threading.Thread(target=run_bot, daemon=True).start()
-
-# =============================================
-# ЗАПУСК FLASK ДЛЯ RENDER
-# =============================================
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
